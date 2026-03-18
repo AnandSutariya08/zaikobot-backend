@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon index.js",
-    "start": "node index.js"
+    "start": "node index.js",
+    "migrate:firebase": "node scripts/migrate-json-to-firestore.js"
   },
   "dependencies": {
     "boat": "file:..",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "firebase-admin": "^12.7.0",
     "sharp": "^0.34.4"
   },
   "devDependencies": {

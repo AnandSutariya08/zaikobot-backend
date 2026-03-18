@@ -1,16 +1,13 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { db } from "./firebaseAdmin.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const PRODUCTS_FILE = path.join(__dirname, "data", "products.json");
-const CHANNELS_FILE = path.join(__dirname, "data", "channels.json");
-const SCHEDULES_FILE = path.join(__dirname, "data", "schedules.json");
-const SUBSCRIBERS_FILE = path.join(__dirname, "data", "subscribers.json");
-const INTERVALS_FILE = path.join(__dirname, "data", "intervals.json");
-const JOIN_INVITES_FILE = path.join(__dirname, "data", "join-invites.json");
+const COLLECTIONS = {
+  products: "products",
+  channels: "channels",
+  schedules: "schedules",
+  subscribers: "subscribers",
+  intervals: "intervals",
+  joinInvites: "joinInvites"
+};
 
 const log = (message, meta) => {
   if (meta === undefined) {
@@ -20,74 +17,105 @@ const log = (message, meta) => {
   console.log(`[store] ${message}`, meta);
 };
 
-async function readJsonArray(filePath, label) {
-  try {
-    const raw = await fs.readFile(filePath, "utf-8");
-    const parsed = JSON.parse(raw);
-    const data = Array.isArray(parsed) ? parsed : [];
-    log(`${label} loaded`, { count: data.length });
-    return data;
-  } catch {
-    log(`${label} file missing or invalid, returning empty list`);
-    return [];
+function collectionRef(name) {
+  return db.collection(name);
+}
+
+function sortNewestFirst(rows) {
+  return [...rows].sort((a, b) => {
+    const aTime = new Date(a.updatedAt || a.createdAt || 0).getTime();
+    const bTime = new Date(b.updatedAt || b.createdAt || 0).getTime();
+    return bTime - aTime;
+  });
+}
+
+async function readCollection(name, label) {
+  const snapshot = await collectionRef(name).get();
+  const rows = snapshot.docs.map((doc) => {
+    const data = doc.data() || {};
+    return { id: data.id || doc.id, ...data };
+  });
+  log(`${label} loaded`, { count: rows.length });
+  return rows;
+}
+
+async function replaceCollection(name, label, rows) {
+  const snapshot = await collectionRef(name).get();
+  const batch = db.batch();
+  for (const doc of snapshot.docs) {
+    batch.delete(doc.ref);
   }
+  for (const row of rows) {
+    if (!row?.id) continue;
+    batch.set(collectionRef(name).doc(String(row.id)), row);
+  }
+  await batch.commit();
+  log(`${label} saved`, { count: rows.length });
 }
 
-async function writeJsonArray(filePath, label, value) {
-  await fs.writeFile(filePath, JSON.stringify(value, null, 2), "utf-8");
-  log(`${label} saved`, { count: value.length });
+async function upsertById(name, row) {
+  if (!row?.id) {
+    throw new Error("Cannot upsert document without id");
+  }
+  await collectionRef(name).doc(String(row.id)).set(row);
+  return row;
 }
 
+async function deleteById(name, id) {
+  const ref = collectionRef(name).doc(String(id));
+  const doc = await ref.get();
+  if (!doc.exists) return false;
+  await ref.delete();
+  return true;
+}
+
+// Products
 export async function getProducts() {
-  return readJsonArray(PRODUCTS_FILE, "products");
+  return sortNewestFirst(await readCollection(COLLECTIONS.products, "products"));
 }
 
 export async function saveProducts(products) {
-  await writeJsonArray(PRODUCTS_FILE, "products", products);
+  await replaceCollection(COLLECTIONS.products, "products", products);
 }
 
 export async function addProduct(product) {
-  const products = await getProducts();
-  const next = [product, ...products];
-  await saveProducts(next);
+  await upsertById(COLLECTIONS.products, product);
   log("product added", { id: product.id, name: product.name });
   return product;
 }
 
 export async function deleteProduct(id) {
-  const products = await getProducts();
-  const next = products.filter((p) => p.id !== id);
-  await saveProducts(next);
-  log("product delete requested", { id, removed: next.length !== products.length });
-  return next.length !== products.length;
+  const removed = await deleteById(COLLECTIONS.products, id);
+  log("product delete requested", { id, removed });
+  return removed;
 }
 
 export async function updateProduct(id, patch) {
-  const products = await getProducts();
-  const index = products.findIndex((p) => p.id === id);
-  if (index < 0) {
+  const ref = collectionRef(COLLECTIONS.products).doc(String(id));
+  const doc = await ref.get();
+  if (!doc.exists) {
     log("product update requested but not found", { id });
     return null;
   }
-
+  const current = doc.data() || {};
   const updated = {
-    ...products[index],
+    ...current,
     ...patch,
-    id: products[index].id,
+    id: current.id || id,
     updatedAt: new Date().toISOString()
   };
-  products[index] = updated;
-  await saveProducts(products);
+  await ref.set(updated);
   log("product updated", { id, name: updated.name });
   return updated;
 }
 
+// Channels
 export async function getChannels() {
-  return readJsonArray(CHANNELS_FILE, "channels");
+  return sortNewestFirst(await readCollection(COLLECTIONS.channels, "channels"));
 }
 
 export async function saveChannels(channels) {
-  await writeJsonArray(CHANNELS_FILE, "channels", channels);
+  await replaceCollection(COLLECTIONS.channels, "channels", channels);
 }
 
 export async function addChannel(channel) {
@@ -99,57 +127,53 @@ export async function addChannel(channel) {
 }
 
 export async function deleteChannel(id) {
-  const channels = await getChannels();
-  const next = channels.filter((c) => c.id !== id);
-  await saveChannels(next);
-  log("channel delete requested", { id, removed: next.length !== channels.length });
-  return next.length !== channels.length;
+  const removed = await deleteById(COLLECTIONS.channels, id);
+  log("channel delete requested", { id, removed });
+  return removed;
 }
 
+// Schedules
 export async function getSchedules() {
-  return readJsonArray(SCHEDULES_FILE, "schedules");
+  return sortNewestFirst(await readCollection(COLLECTIONS.schedules, "schedules"));
 }
 
 export async function saveSchedules(schedules) {
-  await writeJsonArray(SCHEDULES_FILE, "schedules", schedules);
+  await replaceCollection(COLLECTIONS.schedules, "schedules", schedules);
 }
 
 export async function addSchedule(schedule) {
-  const schedules = await getSchedules();
-  const next = [schedule, ...schedules];
-  await saveSchedules(next);
+  await upsertById(COLLECTIONS.schedules, schedule);
   log("schedule added", { id: schedule.id, channelId: schedule.channelId, sendAt: schedule.sendAt });
   return schedule;
 }
 
 export async function updateSchedule(id, patch) {
-  const schedules = await getSchedules();
-  const index = schedules.findIndex((s) => s.id === id);
-  if (index < 0) {
+  const ref = collectionRef(COLLECTIONS.schedules).doc(String(id));
+  const doc = await ref.get();
+  if (!doc.exists) {
     log("schedule update requested but not found", { id });
     return null;
   }
-  const updated = { ...schedules[index], ...patch, id: schedules[index].id };
-  schedules[index] = updated;
-  await saveSchedules(schedules);
+  const current = doc.data() || {};
+  const updated = { ...current, ...patch, id: current.id || id };
+  await ref.set(updated);
   log("schedule updated", { id, status: updated.status });
   return updated;
 }
 
 export async function deleteSchedule(id) {
-  const schedules = await getSchedules();
-  const next = schedules.filter((s) => s.id !== id);
-  await saveSchedules(next);
-  log("schedule delete requested", { id, removed: next.length !== schedules.length });
-  return next.length !== schedules.length;
+  const removed = await deleteById(COLLECTIONS.schedules, id);
+  log("schedule delete requested", { id, removed });
+  return removed;
 }
 
+// Subscribers
 export async function getSubscribers() {
-  return readJsonArray(SUBSCRIBERS_FILE, "subscribers");
+  return sortNewestFirst(await readCollection(COLLECTIONS.subscribers, "subscribers"));
 }
 
 export async function saveSubscribers(subscribers) {
-  await writeJsonArray(SUBSCRIBERS_FILE, "subscribers", subscribers);
+  await replaceCollection(COLLECTIONS.subscribers, "subscribers", subscribers);
 }
 
 export async function addSubscribersBulk(channelIdNormalized, numbers) {
@@ -177,18 +201,17 @@ export async function addSubscribersBulk(channelIdNormalized, numbers) {
   return { requested: cleaned.length, inserted, skipped: cleaned.length - inserted };
 }
 
+// Intervals
 export async function getIntervals() {
-  return readJsonArray(INTERVALS_FILE, "intervals");
+  return sortNewestFirst(await readCollection(COLLECTIONS.intervals, "intervals"));
 }
 
 export async function saveIntervals(intervals) {
-  await writeJsonArray(INTERVALS_FILE, "intervals", intervals);
+  await replaceCollection(COLLECTIONS.intervals, "intervals", intervals);
 }
 
 export async function addInterval(intervalJob) {
-  const intervals = await getIntervals();
-  const next = [intervalJob, ...intervals];
-  await saveIntervals(next);
+  await upsertById(COLLECTIONS.intervals, intervalJob);
   log("interval added", {
     id: intervalJob.id,
     everySeconds: intervalJob.everySeconds ?? intervalJob.everyMinutes,
@@ -199,25 +222,26 @@ export async function addInterval(intervalJob) {
 }
 
 export async function updateInterval(id, patch) {
-  const intervals = await getIntervals();
-  const index = intervals.findIndex((s) => s.id === id);
-  if (index < 0) {
+  const ref = collectionRef(COLLECTIONS.intervals).doc(String(id));
+  const doc = await ref.get();
+  if (!doc.exists) {
     log("interval update requested but not found", { id });
     return null;
   }
-  const updated = { ...intervals[index], ...patch, id: intervals[index].id };
-  intervals[index] = updated;
-  await saveIntervals(intervals);
+  const current = doc.data() || {};
+  const updated = { ...current, ...patch, id: current.id || id };
+  await ref.set(updated);
   log("interval updated", { id, status: updated.status, lastRunAt: updated.lastRunAt || "" });
   return updated;
 }
 
+// Join invites
 export async function getJoinInvites() {
-  return readJsonArray(JOIN_INVITES_FILE, "join invites");
+  return sortNewestFirst(await readCollection(COLLECTIONS.joinInvites, "join invites"));
 }
 
 export async function saveJoinInvites(invites) {
-  await writeJsonArray(JOIN_INVITES_FILE, "join invites", invites);
+  await replaceCollection(COLLECTIONS.joinInvites, "join invites", invites);
 }
 
 export async function addJoinInvitesBulk(invites) {
@@ -241,21 +265,21 @@ export async function findJoinInvite(channelIdNormalized, inviteLink) {
 }
 
 export async function updateJoinInvite(id, patch) {
-  const invites = await getJoinInvites();
-  const index = invites.findIndex((row) => row.id === id);
-  if (index < 0) {
+  const ref = collectionRef(COLLECTIONS.joinInvites).doc(String(id));
+  const doc = await ref.get();
+  if (!doc.exists) {
     log("join invite update requested but not found", { id });
     return null;
   }
 
+  const current = doc.data() || {};
   const updated = {
-    ...invites[index],
+    ...current,
     ...patch,
-    id: invites[index].id,
+    id: current.id || id,
     updatedAt: new Date().toISOString()
   };
-  invites[index] = updated;
-  await saveJoinInvites(invites);
+  await ref.set(updated);
   log("join invite updated", { id, status: updated.status });
   return updated;
 }

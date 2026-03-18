@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import express from "express";
 import cors from "cors";
 import sharp from "sharp";
+import { storage } from "./firebaseAdmin.js";
 import {
   addChannel,
   addProduct,
@@ -55,6 +56,53 @@ function parseDataUrl(value) {
   const match = text.match(/^data:([^;]+);base64,(.+)$/);
   if (!match) return null;
   return { mime: String(match[1] || "").toLowerCase(), base64: String(match[2] || "") };
+}
+
+function getExtFromMimeType(mime) {
+  const text = String(mime || "").toLowerCase();
+  if (text.includes("image/png")) return "png";
+  if (text.includes("image/webp")) return "webp";
+  if (text.includes("image/gif")) return "gif";
+  return "jpg";
+}
+
+function sanitizeStorageName(name, fallback) {
+  const clean = String(name || "").trim().replace(/[^a-zA-Z0-9._-]/g, "_");
+  return clean || fallback;
+}
+
+async function uploadProductImageToFirebase({ productId, imageBase64, imageMime, imageFileName }) {
+  const parsed = parseDataUrl(imageBase64);
+  const mime = (parsed?.mime || String(imageMime || "").trim() || "image/jpeg").toLowerCase();
+  const base64 = parsed?.base64 || String(imageBase64 || "").trim();
+  if (!base64) return null;
+
+  const buffer = Buffer.from(base64, "base64");
+  if (!buffer.length) {
+    throw new Error("Invalid imageBase64 payload");
+  }
+
+  const ext = getExtFromMimeType(mime);
+  const safeFileName = sanitizeStorageName(imageFileName, `product.${ext}`);
+  const imageStoragePath = `products/${productId}/${Date.now()}-${safeFileName}`;
+  const token = crypto.randomUUID();
+  const bucket = storage.bucket();
+  const file = bucket.file(imageStoragePath);
+
+  await file.save(buffer, {
+    resumable: false,
+    contentType: mime,
+    metadata: {
+      contentType: mime,
+      metadata: {
+        firebaseStorageDownloadTokens: token
+      }
+    }
+  });
+
+  const encodedPath = encodeURIComponent(imageStoragePath);
+  const imageUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodedPath}?alt=media&token=${token}`;
+  return { imageUrl, imageMime: mime, imageStoragePath };
 }
 
 async function optimizeImageBase64Lossless(imageBase64, imageMimeInput = "") {
@@ -471,20 +519,35 @@ app.post("/api/products", async (req, res) => {
     return res.status(400).json({ ok: false, error: "name is required" });
   }
 
-  const optimized = await optimizeImageBase64Lossless(imageBase64, imageMime);
-  const product = {
-    id: crypto.randomUUID(),
-    name: name.trim(),
-    price: String(price ?? "").trim(),
-    details: String(details ?? "").trim(),
-    imageUrl: String(imageUrl ?? "").trim(),
-    imageBase64: optimized.imageBase64,
-    imageMime: optimized.imageMime,
-    imageFileName: String(imageFileName ?? "").trim(),
-    createdAt: new Date().toISOString()
-  };
-  await addProduct(product);
-  return res.status(201).json({ ok: true, product });
+  try {
+    const productId = crypto.randomUUID();
+    const optimized = await optimizeImageBase64Lossless(imageBase64, imageMime);
+    const uploaded = optimized.imageBase64
+      ? await uploadProductImageToFirebase({
+          productId,
+          imageBase64: optimized.imageBase64,
+          imageMime: optimized.imageMime,
+          imageFileName
+        })
+      : null;
+
+    const product = {
+      id: productId,
+      name: name.trim(),
+      price: String(price ?? "").trim(),
+      details: String(details ?? "").trim(),
+      imageUrl: uploaded?.imageUrl || String(imageUrl ?? "").trim(),
+      imageBase64: "",
+      imageMime: uploaded?.imageMime || String(imageMime ?? "").trim(),
+      imageFileName: String(imageFileName ?? "").trim(),
+      imageStoragePath: uploaded?.imageStoragePath || "",
+      createdAt: new Date().toISOString()
+    };
+    await addProduct(product);
+    return res.status(201).json({ ok: true, product });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 app.put("/api/products/:id", async (req, res) => {
@@ -493,22 +556,36 @@ app.put("/api/products/:id", async (req, res) => {
     return res.status(400).json({ ok: false, error: "name is required" });
   }
 
-  const optimized = await optimizeImageBase64Lossless(imageBase64, imageMime);
-  const updated = await updateProduct(req.params.id, {
-    name: name.trim(),
-    price: String(price ?? "").trim(),
-    details: String(details ?? "").trim(),
-    imageUrl: String(imageUrl ?? "").trim(),
-    imageBase64: optimized.imageBase64,
-    imageMime: optimized.imageMime,
-    imageFileName: String(imageFileName ?? "").trim()
-  });
+  try {
+    const optimized = await optimizeImageBase64Lossless(imageBase64, imageMime);
+    const uploaded = optimized.imageBase64
+      ? await uploadProductImageToFirebase({
+          productId: req.params.id,
+          imageBase64: optimized.imageBase64,
+          imageMime: optimized.imageMime,
+          imageFileName
+        })
+      : null;
 
-  if (!updated) {
-    return res.status(404).json({ ok: false, error: "product not found" });
+    const updated = await updateProduct(req.params.id, {
+      name: name.trim(),
+      price: String(price ?? "").trim(),
+      details: String(details ?? "").trim(),
+      imageUrl: uploaded?.imageUrl || String(imageUrl ?? "").trim(),
+      imageBase64: "",
+      imageMime: uploaded?.imageMime || String(imageMime ?? "").trim(),
+      imageFileName: String(imageFileName ?? "").trim(),
+      imageStoragePath: uploaded?.imageStoragePath || ""
+    });
+
+    if (!updated) {
+      return res.status(404).json({ ok: false, error: "product not found" });
+    }
+
+    return res.json({ ok: true, product: updated });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
-
-  return res.json({ ok: true, product: updated });
 });
 
 app.delete("/api/products/:id", async (req, res) => {
