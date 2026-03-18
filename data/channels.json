@@ -1,0 +1,20 @@
+[
+  {
+    "id": "c182b18c-6fca-43f5-a8f0-0e4d1e806c7e",
+    "name": "Bhumit and Anand",
+    "channelIdRaw": "1003875366119",
+    "channelIdNormalized": "-1003875366119",
+    "chatTitle": "Bhumit and Anand",
+    "chatType": "supergroup",
+    "createdAt": "2026-03-18T09:55:05.352Z"
+  },
+  {
+    "id": "ae7c822a-6a2b-4f6d-96e5-a0375c09a1ec",
+    "name": "Zaikoenterprise",
+    "channelIdRaw": "1003828022465",
+    "channelIdNormalized": "-1003828022465",
+    "chatTitle": "Zaikoenterprise",
+    "chatType": "channel",
+    "createdAt": "2026-03-18T06:36:46.347Z"
+  }
+]
