@@ -42,8 +42,7 @@ dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
-const MIN_INTERVAL_SECONDS = 5;
-const MAX_PRODUCTS_PER_GROUP = 100;
+const MIN_INTERVAL_SECONDS = 3;
 const scheduleTimers = new Map();
 const intervalTimers = new Map();
 const intervalRunning = new Set();
@@ -578,9 +577,6 @@ app.post("/api/product-groups", async (req, res) => {
   if (ids.length === 0) {
     return res.status(400).json({ ok: false, error: "productIds must be a non-empty array" });
   }
-  if (ids.length > MAX_PRODUCTS_PER_GROUP) {
-    return res.status(400).json({ ok: false, error: `A group can have at most ${MAX_PRODUCTS_PER_GROUP} products` });
-  }
 
   const products = await getProducts();
   const productSet = new Set(products.map((p) => p.id));
@@ -615,9 +611,6 @@ app.put("/api/product-groups/:id", async (req, res) => {
     const ids = normalizeIdList(productIds);
     if (ids.length === 0) {
       return res.status(400).json({ ok: false, error: "productIds must be a non-empty array" });
-    }
-    if (ids.length > MAX_PRODUCTS_PER_GROUP) {
-      return res.status(400).json({ ok: false, error: `A group can have at most ${MAX_PRODUCTS_PER_GROUP} products` });
     }
     const products = await getProducts();
     const productSet = new Set(products.map((p) => p.id));
