@@ -12,19 +12,23 @@ import {
   addInterval,
   deleteChannel,
   deleteProduct,
+  deleteProductGroup,
   deleteSchedule,
   getChannels,
   getIntervals,
   getProducts,
+  getProductGroups,
   getSubscribers,
   getJoinInvites,
   getSchedules,
   updateInterval,
   updateJoinInvite,
   updateProduct,
+  updateProductGroup,
   updateSchedule,
   addJoinInvitesBulk,
-  findJoinInvite
+  findJoinInvite,
+  addProductGroup
 } from "./store.js";
 import {
   approveJoinRequest,
@@ -38,6 +42,8 @@ dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
+const MIN_INTERVAL_SECONDS = 5;
+const MAX_PRODUCTS_PER_GROUP = 100;
 const scheduleTimers = new Map();
 const intervalTimers = new Map();
 const intervalRunning = new Set();
@@ -170,6 +176,45 @@ function getIntervalSeconds(intervalJob) {
   return normalizeIntervalSeconds(intervalJob?.everySeconds ?? intervalJob?.everyMinutes);
 }
 
+function normalizeIdList(value) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((x) => String(x || "").trim()).filter(Boolean))];
+}
+
+function buildProductLookup(products) {
+  return new Map(products.map((product) => [product.id, product]));
+}
+
+async function resolveSelectedProducts(allProducts, productIdsInput, groupIdsInput) {
+  const productIds = normalizeIdList(productIdsInput);
+  const groupIds = normalizeIdList(groupIdsInput);
+  const allById = buildProductLookup(allProducts);
+  const selectedMap = new Map();
+
+  for (const id of productIds) {
+    const product = allById.get(id);
+    if (product) selectedMap.set(id, product);
+  }
+
+  if (groupIds.length > 0) {
+    const groups = await getProductGroups();
+    const selectedGroups = groups.filter((group) => groupIds.includes(group.id));
+    for (const group of selectedGroups) {
+      const ids = normalizeIdList(group.productIds);
+      for (const id of ids) {
+        const product = allById.get(id);
+        if (product) selectedMap.set(id, product);
+      }
+    }
+  }
+
+  return {
+    selected: Array.from(selectedMap.values()),
+    normalizedProductIds: productIds,
+    normalizedGroupIds: groupIds
+  };
+}
+
 function clearScheduleTimer(scheduleId) {
   const timer = scheduleTimers.get(scheduleId);
   if (timer) {
@@ -255,7 +300,8 @@ async function executeInterval(intervalId) {
     }
 
     const allProducts = await getProducts();
-    const selected = allProducts.filter((p) => intervalJob.productIds.includes(p.id));
+    const resolved = await resolveSelectedProducts(allProducts, intervalJob.productIds, intervalJob.groupIds);
+    const selected = resolved.selected;
     if (selected.length === 0) {
       await updateInterval(intervalId, {
         lastRunAt: new Date().toISOString(),
@@ -294,7 +340,10 @@ function startIntervalTimer(intervalJob) {
   if (!intervalJob || intervalJob.status !== "active") return;
   clearIntervalTimer(intervalJob.id);
   const everySeconds = getIntervalSeconds(intervalJob);
-  if (everySeconds < 1) return;
+  if (everySeconds < MIN_INTERVAL_SECONDS) {
+    log("interval not started due to minimum delay", { intervalId: intervalJob.id, everySeconds, minSeconds: MIN_INTERVAL_SECONDS });
+    return;
+  }
   const timer = setInterval(() => {
     executeInterval(intervalJob.id).catch((error) => {
       log("interval execution failed", { intervalId: intervalJob.id, error: error instanceof Error ? error.message : String(error) });
@@ -513,6 +562,86 @@ app.get("/api/products", async (_req, res) => {
   res.json({ ok: true, products });
 });
 
+app.get("/api/product-groups", async (_req, res) => {
+  const groups = await getProductGroups();
+  return res.json({ ok: true, groups });
+});
+
+app.post("/api/product-groups", async (req, res) => {
+  const { name, productIds } = req.body ?? {};
+  const cleanName = String(name || "").trim();
+  if (!cleanName) {
+    return res.status(400).json({ ok: false, error: "name is required" });
+  }
+
+  const ids = normalizeIdList(productIds);
+  if (ids.length === 0) {
+    return res.status(400).json({ ok: false, error: "productIds must be a non-empty array" });
+  }
+  if (ids.length > MAX_PRODUCTS_PER_GROUP) {
+    return res.status(400).json({ ok: false, error: `A group can have at most ${MAX_PRODUCTS_PER_GROUP} products` });
+  }
+
+  const products = await getProducts();
+  const productSet = new Set(products.map((p) => p.id));
+  const validIds = ids.filter((id) => productSet.has(id));
+  if (validIds.length === 0) {
+    return res.status(404).json({ ok: false, error: "No matching products found for group" });
+  }
+
+  const group = {
+    id: crypto.randomUUID(),
+    name: cleanName,
+    productIds: validIds,
+    createdAt: new Date().toISOString()
+  };
+  await addProductGroup(group);
+  return res.status(201).json({ ok: true, group });
+});
+
+app.put("/api/product-groups/:id", async (req, res) => {
+  const { name, productIds } = req.body ?? {};
+  const patch = {};
+
+  if (name !== undefined) {
+    const cleanName = String(name || "").trim();
+    if (!cleanName) {
+      return res.status(400).json({ ok: false, error: "name cannot be empty" });
+    }
+    patch.name = cleanName;
+  }
+
+  if (productIds !== undefined) {
+    const ids = normalizeIdList(productIds);
+    if (ids.length === 0) {
+      return res.status(400).json({ ok: false, error: "productIds must be a non-empty array" });
+    }
+    if (ids.length > MAX_PRODUCTS_PER_GROUP) {
+      return res.status(400).json({ ok: false, error: `A group can have at most ${MAX_PRODUCTS_PER_GROUP} products` });
+    }
+    const products = await getProducts();
+    const productSet = new Set(products.map((p) => p.id));
+    patch.productIds = ids.filter((id) => productSet.has(id));
+    if (patch.productIds.length === 0) {
+      return res.status(404).json({ ok: false, error: "No matching products found for group" });
+    }
+  }
+
+  const updated = await updateProductGroup(req.params.id, patch);
+  if (!updated) {
+    return res.status(404).json({ ok: false, error: "group not found" });
+  }
+  return res.json({ ok: true, group: updated });
+});
+
+app.delete("/api/product-groups/:id", async (req, res) => {
+  const removed = await deleteProductGroup(req.params.id);
+  if (!removed) {
+    return res.status(404).json({ ok: false, error: "group not found" });
+  }
+  return res.json({ ok: true });
+});
+
 app.post("/api/products", async (req, res) => {
   const { name, price, details, imageUrl, imageBase64, imageMime, imageFileName } = req.body ?? {};
   if (!name || typeof name !== "string") {
@@ -597,15 +726,13 @@ app.delete("/api/products/:id", async (req, res) => {
 });
 
 app.post("/api/send", async (req, res) => {
-  const { productIds, channelIds, channelId } = req.body ?? {};
-  if (!Array.isArray(productIds) || productIds.length === 0) {
-    return res.status(400).json({ ok: false, error: "productIds must be a non-empty array" });
-  }
-
+  const { productIds, groupIds, groupId, channelIds, channelId } = req.body ?? {};
+  const requestedGroupIds = Array.isArray(groupIds) ? groupIds : String(groupId || "").trim() ? [groupId] : [];
   const all = await getProducts();
-  const selected = all.filter((p) => productIds.includes(p.id));
+  const resolved = await resolveSelectedProducts(all, productIds, requestedGroupIds);
+  const selected = resolved.selected;
   if (selected.length === 0) {
-    return res.status(404).json({ ok: false, error: "No matching products found" });
+    return res.status(404).json({ ok: false, error: "No matching products found from selected products/groups" });
   }
 
   const normalizedChannels = Array.isArray(channelIds)
@@ -620,6 +747,7 @@ app.post("/api/send", async (req, res) => {
 
   log("multi-channel send requested", {
     productCount: selected.length,
+    groupCount: resolved.normalizedGroupIds.length,
     channelCount: [...new Set(normalizedChannels)].length,
     channels: [...new Set(normalizedChannels)]
   });
@@ -653,23 +781,27 @@ app.get("/api/intervals", async (_req, res) => {
 });
 
 app.post("/api/intervals", async (req, res) => {
-  const { productIds, channelIds, everySeconds, everyMinutes } = req.body ?? {};
-  if (!Array.isArray(productIds) || productIds.length === 0) {
-    return res.status(400).json({ ok: false, error: "productIds must be a non-empty array" });
-  }
+  const { productIds, groupIds, everySeconds, everyMinutes, channelIds } = req.body ?? {};
 
   if (!Array.isArray(channelIds) || channelIds.length === 0) {
     return res.status(400).json({ ok: false, error: "channelIds must be a non-empty array" });
   }
 
+  const normalizedProductIds = normalizeIdList(productIds);
+  const normalizedGroupIds = normalizeIdList(groupIds);
+  if (normalizedProductIds.length === 0 && normalizedGroupIds.length === 0) {
+    return res.status(400).json({ ok: false, error: "Select at least one product or one group" });
+  }
+
   const seconds = normalizeIntervalSeconds(everySeconds ?? everyMinutes);
-  if (seconds < 1) {
-    return res.status(400).json({ ok: false, error: "everySeconds must be at least 1" });
+  if (seconds < MIN_INTERVAL_SECONDS) {
+    return res.status(400).json({ ok: false, error: `everySeconds must be at least ${MIN_INTERVAL_SECONDS}` });
   }
 
   const intervalJob = {
     id: crypto.randomUUID(),
-    productIds: [...new Set(productIds.map((x) => String(x || "").trim()).filter(Boolean))],
+    productIds: normalizedProductIds,
+    groupIds: normalizedGroupIds,
     channelIds: [...new Set(channelIds.map((x) => String(x || "").trim()).filter(Boolean))],
     everySeconds: seconds,
     status: "active",
@@ -680,8 +812,8 @@ app.post("/api/intervals", async (req, res) => {
     failed: 0
   };
 
-  if (intervalJob.productIds.length === 0 || intervalJob.channelIds.length === 0) {
-    return res.status(400).json({ ok: false, error: "Select at least one product and one channel" });
+  if ((intervalJob.productIds.length === 0 && intervalJob.groupIds.length === 0) || intervalJob.channelIds.length === 0) {
+    return res.status(400).json({ ok: false, error: "Select at least one product/group and one channel" });
   }
 
   await addInterval(intervalJob);

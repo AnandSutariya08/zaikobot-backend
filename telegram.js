@@ -4,6 +4,8 @@ dotenv.config();
 
 const BOT_TOKEN = '8761982010:AAGBzQXPEvw3e0NGZJudYhV9sidF16tPh0c';
 const CHANNEL_ID_RAW = '1003828022465';
+const TELEGRAM_MAX_RETRIES = Math.max(0, Math.floor(Number(process.env.TELEGRAM_MAX_RETRIES || 5) || 5));
+const TELEGRAM_SEND_DELAY_MS = Math.max(0, Math.floor(Number(process.env.TELEGRAM_SEND_DELAY_MS || 300) || 300));
 const log = (message, meta) => {
   if (meta === undefined) {
     console.log(`[telegram] ${message}`);
@@ -11,6 +13,25 @@ const log = (message, meta) => {
   }
   console.log(`[telegram] ${message}`, meta);
 };
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryAfterSeconds(payload) {
+  const fromParams = Number(payload?.parameters?.retry_after);
+  if (Number.isFinite(fromParams) && fromParams > 0) {
+    return Math.floor(fromParams);
+  }
+
+  const description = String(payload?.description || "");
+  const match = description.match(/retry after\s+(\d+)/i);
+  if (match?.[1]) {
+    const value = Number(match[1]);
+    if (Number.isFinite(value) && value > 0) return Math.floor(value);
+  }
+  return 0;
+}
 
 function validateConfig() {
   if (!BOT_TOKEN) {
@@ -42,27 +63,44 @@ function getChannelId(channelIdInput = "") {
   throw new Error("Channel ID is required");
 }
 
-async function telegramRequest(method, body) {
+async function telegramRequest(method, body, attempt = 0) {
   validateConfig();
   let res;
   try {
-    log("telegram request", { method });
+    log("telegram request", { method, attempt });
     res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
   } catch {
-    log("telegram request failed: network error", { method });
-    throw new Error("Cannot reach Telegram API");
+    if (attempt < TELEGRAM_MAX_RETRIES) {
+      const waitMs = Math.min(1000 * (attempt + 1), 5000);
+      log("telegram request network error, retrying", { method, attempt, waitMs });
+      await sleep(waitMs);
+      return telegramRequest(method, body, attempt + 1);
+    }
+    log("telegram request failed: network error", { method, attempt });
+    throw new Error("Cannot reach Telegram API after retries");
   }
 
   const data = await res.json();
   if (!data.ok) {
+    const retryAfter = parseRetryAfterSeconds(data);
+    if (retryAfter > 0 && attempt < TELEGRAM_MAX_RETRIES) {
+      const waitMs = (retryAfter + 1) * 1000;
+      log("telegram rate limited, retrying", { method, attempt, retryAfterSeconds: retryAfter });
+      await sleep(waitMs);
+      return telegramRequest(method, body, attempt + 1);
+    }
     log("telegram request failed", { method, description: data.description || "unknown error" });
     throw new Error(data.description || "Telegram API request failed");
   }
-  log("telegram request success", { method });
+  if (attempt > 0) {
+    log("telegram request success after retry", { method, attempt });
+  } else {
+    log("telegram request success", { method });
+  }
   return data;
 }
 
@@ -98,7 +136,7 @@ function sanitizeFileName(name, fallback = "product.jpg") {
   return clean || fallback;
 }
 
-async function sendPhotoWithFormData(formData) {
+async function sendPhotoWithFormData(formData, attempt = 0) {
   const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
     method: "POST",
     body: formData
@@ -106,6 +144,13 @@ async function sendPhotoWithFormData(formData) {
 
   const data = await res.json();
   if (!data.ok) {
+    const retryAfter = parseRetryAfterSeconds(data);
+    if (retryAfter > 0 && attempt < TELEGRAM_MAX_RETRIES) {
+      const waitMs = (retryAfter + 1) * 1000;
+      log("sendPhoto rate limited, retrying upload", { attempt, retryAfterSeconds: retryAfter });
+      await sleep(waitMs);
+      return sendPhotoWithFormData(formData, attempt + 1);
+    }
     throw new Error(data.description || "Telegram sendPhoto upload failed");
   }
   return data;
@@ -338,6 +383,10 @@ export async function sendProductsBulk(products, options = {}) {
         ok: false,
         error: message
       });
+    }
+
+    if (TELEGRAM_SEND_DELAY_MS > 0) {
+      await sleep(TELEGRAM_SEND_DELAY_MS);
     }
   }
 

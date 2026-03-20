@@ -2,6 +2,7 @@ import { db } from "./firebaseAdmin.js";
 
 const COLLECTIONS = {
   products: "products",
+  productGroups: "productGroups",
   channels: "channels",
   schedules: "schedules",
   subscribers: "subscribers",
@@ -107,6 +108,46 @@ export async function updateProduct(id, patch) {
   await ref.set(updated);
   log("product updated", { id, name: updated.name });
   return updated;
+}
+
+// Product groups
+export async function getProductGroups() {
+  return sortNewestFirst(await readCollection(COLLECTIONS.productGroups, "product groups"));
+}
+
+export async function saveProductGroups(groups) {
+  await replaceCollection(COLLECTIONS.productGroups, "product groups", groups);
+}
+
+export async function addProductGroup(group) {
+  await upsertById(COLLECTIONS.productGroups, group);
+  log("product group added", { id: group.id, name: group.name, productCount: (group.productIds || []).length });
+  return group;
+}
+
+export async function updateProductGroup(id, patch) {
+  const ref = collectionRef(COLLECTIONS.productGroups).doc(String(id));
+  const doc = await ref.get();
+  if (!doc.exists) {
+    log("product group update requested but not found", { id });
+    return null;
+  }
+  const current = doc.data() || {};
+  const updated = {
+    ...current,
+    ...patch,
+    id: current.id || id,
+    updatedAt: new Date().toISOString()
+  };
+  await ref.set(updated);
+  log("product group updated", { id, name: updated.name, productCount: (updated.productIds || []).length });
+  return updated;
+}
+
+export async function deleteProductGroup(id) {
+  const removed = await deleteById(COLLECTIONS.productGroups, id);
+  log("product group delete requested", { id, removed });
+  return removed;
 }
 
 // Channels
